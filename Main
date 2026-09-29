@@ -1,0 +1,682 @@
+import numpy as np
+import tkinter as tk
+from tkinter import ttk, messagebox
+import matplotlib
+matplotlib.use("TkAgg")
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.animation import FuncAnimation
+
+class ConjugateGradientApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Сопряжённые градиенты — 3D визуализация метода")
+        self.root.geometry("1460x860")
+        self.root.minsize(1200, 740)
+        self.root.configure(bg="#f3f6fb")
+
+        self.animation = None
+        self.is_running = False
+        self.smooth_path = None
+        self.solution = None
+        self.current_info_text = "Введите параметры и нажмите «Старт»."
+        self.params = None
+        
+        self.log_window = None
+        self.log_text_widget = None
+
+        self.setup_style()
+        self.build_ui()
+        self.draw_base_plot()
+
+    # -----------------------------
+    # Оформление
+    # -----------------------------
+    def setup_style(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        style.configure("Main.TFrame", background="#f3f6fb")
+        style.configure("Panel.TFrame", background="#ffffff")
+        style.configure(
+            "Header.TLabel",
+            background="#1f3b73",
+            foreground="white",
+            font=("Segoe UI", 18, "bold"),
+            padding=12
+        )
+        style.configure(
+            "PanelHeader.TLabel",
+            background="#ffffff",
+            foreground="#111827",
+            font=("Segoe UI", 12, "bold")
+        )
+        style.configure(
+            "TLabel",
+            background="#ffffff",
+            foreground="#111827",
+            font=("Segoe UI", 10)
+        )
+        style.configure("TButton", font=("Segoe UI", 10), padding=7)
+        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=8)
+
+    # -----------------------------
+    # Математика
+    # -----------------------------
+    def f(self, x, y, p):
+        A, B, C, D, E, F = p
+        return A * x**2 + B * y**2 + C * x * y + D * x + E * y + F
+
+    def grad(self, x, y, p):
+        A, B, C, D, E, _ = p
+        gx = 2 * A * x + C * y + D
+        gy = 2 * B * y + C * x + E
+        return np.array([gx, gy], dtype=float)
+
+    def hessian(self, p):
+        A, B, C, _, _, _ = p
+        return np.array([[2 * A, C],
+                         [C, 2 * B]], dtype=float)
+
+    def exact_solution(self, p):
+        _, _, _, D, E, _ = p
+        H = self.hessian(p)
+        b = np.array([-D, -E], dtype=float)
+        try:
+            return np.linalg.solve(H, b)
+        except np.linalg.LinAlgError:
+            return None
+
+    def conjugate_gradient(self, start, p, tol=1e-6, max_iter=20):
+        """Классический метод сопряжённых градиентов"""
+        H = self.hessian(p)
+        x = np.array(start, dtype=float)
+        
+        g = self.grad(x[0], x[1], p)
+        d = -g
+        path_points = [x.copy()]
+        iteration_data = []
+        
+        if np.linalg.norm(g) < tol:
+            return np.array(path_points), iteration_data
+        
+        for iteration in range(max_iter):
+            denom = d @ H @ d
+            if abs(denom) < 1e-12:
+                break
+            
+            alpha = -(g @ d) / denom
+            x_new = x + alpha * d
+            
+            path_points.append(x_new.copy())
+            
+            iteration_data.append({
+                'iteration': iteration + 1,
+                'x': x_new[0],
+                'y': x_new[1],
+                'f_value': self.f(x_new[0], x_new[1], p),
+                'grad_norm': np.linalg.norm(self.grad(x_new[0], x_new[1], p))
+            })
+            
+            g_new = self.grad(x_new[0], x_new[1], p)
+            
+            if np.linalg.norm(g_new) < tol:
+                break
+            
+            beta = (g_new @ g_new) / (g @ g)
+            d = -g_new + beta * d
+            
+            x = x_new
+            g = g_new
+        
+        # Интерполируем траекторию для плавной анимации
+        smooth_path = self.interpolate_path(np.array(path_points), 100)
+        return smooth_path, iteration_data
+    
+    def interpolate_path(self, path, num_points):
+        """Интерполяция пути для плавной анимации"""
+        if len(path) < 2:
+            return path
+        
+        # Вычисляем длины сегментов
+        distances = [0]
+        for i in range(1, len(path)):
+            dist = np.linalg.norm(path[i] - path[i-1])
+            distances.append(distances[-1] + dist)
+        
+        total_length = distances[-1]
+        if total_length == 0:
+            return path
+        
+        # Создаем равномерные точки
+        t = np.linspace(0, total_length, num_points)
+        interpolated = []
+        
+        idx = 0
+        for ti in t:
+            while idx < len(distances) - 1 and distances[idx + 1] < ti:
+                idx += 1
+            
+            if idx >= len(path) - 1:
+                interpolated.append(path[-1])
+            else:
+                # Линейная интерполяция
+                if distances[idx + 1] - distances[idx] > 0:
+                    alpha = (ti - distances[idx]) / (distances[idx + 1] - distances[idx])
+                    point = path[idx] + alpha * (path[idx + 1] - path[idx])
+                else:
+                    point = path[idx]
+                interpolated.append(point)
+        
+        return np.array(interpolated)
+
+    # -----------------------------
+    # Интерфейс
+    # -----------------------------
+    def build_ui(self):
+        main = ttk.Frame(self.root, style="Main.TFrame")
+        main.pack(fill="both", expand=True)
+
+        header = ttk.Label(
+            main,
+            text="Метод сопряжённых градиентов для квадратичной функции — 3D визуализация",
+            style="Header.TLabel",
+            anchor="center"
+        )
+        header.pack(fill="x", padx=14, pady=(14, 10))
+
+        content = ttk.Frame(main, style="Main.TFrame")
+        content.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+
+        # Левая панель с параметрами
+        left = ttk.Frame(content, style="Panel.TFrame", width=360)
+        left.pack(side="left", fill="y", padx=(0, 10))
+        left.pack_propagate(False)
+
+        # Правая панель с графиком
+        right = ttk.Frame(content, style="Panel.TFrame")
+        right.pack(side="right", fill="both", expand=True)
+
+        # ---------- Параметры ----------
+        params_frame = ttk.Frame(left, style="Panel.TFrame")
+        params_frame.pack(fill="x", padx=14, pady=14)
+
+        ttk.Label(params_frame, text="Параметры функции", style="PanelHeader.TLabel").pack(anchor="w", pady=(0, 8))
+
+        self.entries = {}
+        fields = [
+            ("A", "1.5"),
+            ("B", "2.5"),
+            ("C", "0.8"),
+            ("D", "-10"),
+            ("E", "-8"),
+            ("F", "0"),
+            ("x0", "7"),
+            ("y0", "6"),
+            ("tol", "0.0001"),
+            ("max_iter", "15"),
+        ]
+
+        grid = ttk.Frame(params_frame, style="Panel.TFrame")
+        grid.pack(fill="x")
+
+        labels = ["A:", "B:", "C:", "D:", "E:", "F:", "x₀:", "y₀:", "Точность:", "Макс. итераций:"]
+        
+        for i, (key, default_value) in enumerate(fields):
+            ttk.Label(grid, text=labels[i]).grid(row=i, column=0, sticky="w", padx=(0, 8), pady=2)
+            entry = tk.Entry(
+                grid,
+                font=("Segoe UI", 10),
+                bg="#f8fafc",
+                fg="#111827",
+                relief="solid",
+                bd=1,
+                insertbackground="#111827",
+                width=15
+            )
+            entry.grid(row=i, column=1, sticky="ew", pady=2, ipady=2)
+            entry.insert(0, default_value)
+            self.entries[key] = entry
+
+        grid.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            params_frame,
+            text="f(x, y) = A·x² + B·y² + C·x·y + D·x + E·y + F",
+            justify="left",
+            font=("Segoe UI", 9)
+        ).pack(anchor="w", pady=(8, 0))
+
+        ttk.Label(
+            params_frame,
+            text="✓ Для выпуклой задачи: A > 0, B > 0, 4AB - C² > 0",
+            justify="left",
+            font=("Segoe UI", 9),
+            foreground="#059669"
+        ).pack(anchor="w", pady=(2, 0))
+
+        # ---------- Кнопки управления ----------
+        btn_frame = ttk.Frame(left, style="Panel.TFrame")
+        btn_frame.pack(fill="x", padx=14, pady=(0, 8))
+
+        ttk.Button(btn_frame, text="▶ Старт", style="Accent.TButton", command=self.start).pack(fill="x", pady=3)
+        ttk.Button(btn_frame, text="⟳ Сброс", command=self.reset).pack(fill="x", pady=3)
+        ttk.Button(btn_frame, text="📋 Ход работы", command=self.show_log_window).pack(fill="x", pady=3)
+        ttk.Button(btn_frame, text="✖ Выход", command=self.exit_app).pack(fill="x", pady=3)
+
+        # ---------- Справка ----------
+        help_frame = ttk.Frame(left, style="Panel.TFrame")
+        help_frame.pack(fill="x", padx=14, pady=(0, 14))
+
+        ttk.Label(help_frame, text="Информация", style="PanelHeader.TLabel").pack(anchor="w", pady=(0, 6))
+        ttk.Button(help_frame, text="📖 История метода", command=self.show_history).pack(fill="x", pady=2)
+        ttk.Button(help_frame, text="⚙ Алгоритм метода", command=self.show_algorithm).pack(fill="x", pady=2)
+        ttk.Button(help_frame, text="💡 Применение", command=self.show_application).pack(fill="x", pady=2)
+
+        # ---------- 3D График ----------
+        self.fig = plt.figure(figsize=(10.2, 7.4), dpi=100)
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.fig.patch.set_facecolor("#ffffff")
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=14, pady=14)
+
+    # -----------------------------
+    # Окно хода работы
+    # -----------------------------
+    def show_log_window(self):
+        if self.log_window is not None and self.log_window.winfo_exists():
+            self.log_window.lift()
+            self.log_window.focus_force()
+            self.update_log_window()
+            return
+
+        self.log_window = tk.Toplevel(self.root)
+        self.log_window.title("Ход работы метода")
+        self.log_window.geometry("600x500")
+        self.log_window.minsize(500, 400)
+        self.log_window.configure(bg="#f3f6fb")
+
+        frame = tk.Frame(self.log_window, bg="#f3f6fb")
+        frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+        scrollbar = tk.Scrollbar(frame)
+        scrollbar.pack(side="right", fill="y")
+
+        self.log_text_widget = tk.Text(
+            frame,
+            font=("Consolas", 11),
+            wrap="word",
+            bg="#eef4ff",
+            fg="#111827",
+            relief="solid",
+            bd=1,
+            padx=12,
+            pady=12,
+            yscrollcommand=scrollbar.set
+        )
+        self.log_text_widget.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.log_text_widget.yview)
+
+        self.update_log_window()
+
+        def on_close():
+            self.log_window.destroy()
+            self.log_window = None
+            self.log_text_widget = None
+
+        self.log_window.protocol("WM_DELETE_WINDOW", on_close)
+
+    def update_log_window(self):
+        if self.log_window is not None and self.log_window.winfo_exists() and self.log_text_widget is not None:
+            self.log_text_widget.delete("1.0", tk.END)
+            self.log_text_widget.insert(tk.END, self.current_info_text)
+            self.log_text_widget.see("1.0")
+
+    def set_info(self, text):
+        self.current_info_text = text
+        self.update_log_window()
+
+    # -----------------------------
+    # Справочные окна
+    # -----------------------------
+    def show_history(self):
+        text = (
+            "📜 История метода сопряжённых градиентов\n\n"
+            "Метод был предложен в 1952 году Магнусом Хестенсом\n"
+            "и Эдуардом Штифелем.\n\n"
+            "Изначально разработан для решения систем линейных\n"
+            "уравнений с симметричной положительно определённой\n"
+            "матрицей.\n\n"
+            "Позже метод был адаптирован для задач безусловной\n"
+            "минимизации нелинейных функций.\n\n"
+            "Особенность: для квадратичной функции метод\n"
+            "сходится максимум за n шагов, где n — размерность\n"
+            "пространства (в нашем случае за 2 шага)."
+        )
+        messagebox.showinfo("История метода", text)
+
+    def show_algorithm(self):
+        text = (
+            "⚙ Алгоритм метода сопряжённых градиентов\n\n"
+            "1. Задаётся начальная точка x₀\n"
+            "2. Вычисляется градиент g₀ = ∇f(x₀)\n"
+            "3. Первое направление поиска: d₀ = -g₀\n"
+            "4. На каждой итерации k:\n"
+            "   • Вычисляется оптимальный шаг αₖ\n"
+            "   • xₖ₊₁ = xₖ + αₖ·dₖ\n"
+            "   • Вычисляется новый градиент gₖ₊₁\n"
+            "   • βₖ = (gₖ₊₁ᵀ·gₖ₊₁) / (gₖᵀ·gₖ)\n"
+            "   • dₖ₊₁ = -gₖ₊₁ + βₖ·dₖ\n"
+            "5. Повторять до достижения точности ||gₖ|| < ε"
+        )
+        messagebox.showinfo("Алгоритм метода", text)
+
+    def show_application(self):
+        text = (
+            "💡 Применение метода сопряжённых градиентов\n\n"
+            "✓ Минимизация квадратичных функций\n"
+            "✓ Решение систем линейных уравнений\n"
+            "✓ Обучение нейронных сетей\n"
+            "✓ Обработка изображений\n"
+            "✓ Вычислительная математика\n"
+            "✓ Инженерные расчёты\n"
+            "✓ Машинное обучение\n"
+            "✓ Оптимизация в финансах"
+        )
+        messagebox.showinfo("Применение метода", text)
+
+    # -----------------------------
+    # Чтение параметров
+    # -----------------------------
+    def read_params(self):
+        try:
+            A = float(self.entries["A"].get())
+            B = float(self.entries["B"].get())
+            C = float(self.entries["C"].get())
+            D = float(self.entries["D"].get())
+            E = float(self.entries["E"].get())
+            F = float(self.entries["F"].get())
+            x0 = float(self.entries["x0"].get())
+            y0 = float(self.entries["y0"].get())
+            tol = float(self.entries["tol"].get())
+            max_iter = int(self.entries["max_iter"].get())
+
+            if A <= 0 or B <= 0:
+                raise ValueError("A и B должны быть положительными")
+            if 4 * A * B - C**2 <= 0:
+                raise ValueError("Должно выполняться: 4AB - C² > 0")
+            if tol <= 0:
+                raise ValueError("Точность должна быть положительной")
+            if max_iter <= 0:
+                raise ValueError("Число итераций должно быть положительным")
+
+            return (A, B, C, D, E, F), np.array([x0, y0], dtype=float), tol, max_iter
+        except Exception as e:
+            messagebox.showerror("Ошибка ввода", str(e))
+            return None
+
+    # -----------------------------
+    # 3D График
+    # -----------------------------
+    def draw_base_plot(self):
+        """Отрисовка базовой 3D поверхности"""
+        self.ax.clear()
+        
+        data = self.read_params()
+        if data is None:
+            p = (1.5, 2.5, 0.8, -10, -8, 0)
+            start = np.array([7, 6], dtype=float)
+        else:
+            p, start, _, _ = data
+        
+        # Настройка графика
+        self.ax.set_xlabel('X', fontsize=10, labelpad=10)
+        self.ax.set_ylabel('Y', fontsize=10, labelpad=10)
+        self.ax.set_zlabel('f(x, y)', fontsize=10, labelpad=10)
+        self.ax.set_title("Метод сопряжённых градиентов — 3D визуализация", fontsize=14, pad=20)
+        
+        # Определяем область построения
+        sol = self.exact_solution(p)
+        if sol is None:
+            sol = np.array([0, 0], dtype=float)
+        
+        margin = 4
+        x_min = min(start[0], sol[0]) - margin
+        x_max = max(start[0], sol[0]) + margin
+        y_min = min(start[1], sol[1]) - margin
+        y_max = max(start[1], sol[1]) + margin
+        
+        # Строим поверхность
+        x = np.linspace(x_min, x_max, 80)
+        y = np.linspace(y_min, y_max, 80)
+        X, Y = np.meshgrid(x, y)
+        Z = self.f(X, Y, p)
+        
+        # Рисуем поверхность
+        surf = self.ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.7, 
+                                    linewidth=0, antialiased=True)
+        
+        # Контуры внизу
+        z_min = Z.min()
+        self.ax.contour(X, Y, Z, zdir='z', offset=z_min - 2, 
+                       cmap='coolwarm', alpha=0.5)
+        
+        # Начальная точка
+        z_start = self.f(start[0], start[1], p)
+        self.ax.scatter(start[0], start[1], z_start, s=100, marker='o', 
+                       color='#22c55e', label='Начальная точка', 
+                       edgecolors='black', linewidth=1.5)
+        
+        # Точка минимума
+        z_sol = self.f(sol[0], sol[1], p)
+        self.ax.scatter(sol[0], sol[1], z_sol, s=150, marker='*', 
+                       color='#ef4444', label='Точный минимум', 
+                       edgecolors='black', linewidth=1.5)
+        
+        # Легенда
+        self.ax.legend(loc='upper left', bbox_to_anchor=(0, 1))
+        
+        # Начальный угол обзора
+        self.ax.view_init(elev=25, azim=-60)
+        
+        self.canvas.draw()
+
+    # -----------------------------
+    # Анимация
+    # -----------------------------
+    def update_animation(self, frame):
+        """Обновление кадра анимации"""
+        if not hasattr(self, 'smooth_path') or self.smooth_path is None:
+            return
+            
+        self.ax.clear()
+        
+        data = self.read_params()
+        if data is None:
+            return
+            
+        p, start, _, _ = data
+        sol = self.exact_solution(p)
+        if sol is None:
+            sol = np.array([0, 0], dtype=float)
+        
+        # Определяем область
+        margin = 4
+        x_min = min(start[0], sol[0]) - margin
+        x_max = max(start[0], sol[0]) + margin
+        y_min = min(start[1], sol[1]) - margin
+        y_max = max(start[1], sol[1]) + margin
+        
+        # Строим поверхность
+        x = np.linspace(x_min, x_max, 80)
+        y = np.linspace(y_min, y_max, 80)
+        X, Y = np.meshgrid(x, y)
+        Z = self.f(X, Y, p)
+        
+        # Отрисовка
+        self.ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.7, 
+                            linewidth=0, antialiased=True)
+        
+        z_min = Z.min()
+        self.ax.contour(X, Y, Z, zdir='z', offset=z_min - 2, 
+                       cmap='coolwarm', alpha=0.5)
+        
+        # Отмечаем точки
+        z_start = self.f(start[0], start[1], p)
+        self.ax.scatter(start[0], start[1], z_start, s=100, marker='o', 
+                       color='#22c55e', label='Начальная точка', 
+                       edgecolors='black', linewidth=1.5)
+        
+        z_sol = self.f(sol[0], sol[1], p)
+        self.ax.scatter(sol[0], sol[1], z_sol, s=150, marker='*', 
+                       color='#ef4444', label='Точный минимум', 
+                       edgecolors='black', linewidth=1.5)
+        
+        # Рисуем траекторию
+        if frame >= 0 and frame < len(self.smooth_path):
+            part = self.smooth_path[:frame+1]
+            if len(part) > 1:
+                z_path = [self.f(pnt[0], pnt[1], p) for pnt in part]
+                self.ax.plot(part[:, 0], part[:, 1], z_path, 
+                           marker='.', linewidth=2.5, markersize=3, 
+                           color='#f59e0b', label='Траектория метода', alpha=0.8)
+                
+                # Текущая точка
+                curr_x, curr_y = part[-1]
+                curr_z = self.f(curr_x, curr_y, p)
+                self.ax.scatter(curr_x, curr_y, curr_z, s=120, 
+                              color='#dc2626', label='Текущая точка',
+                              edgecolors='black', linewidth=1.5)
+        
+        self.ax.set_xlabel('X', fontsize=10, labelpad=10)
+        self.ax.set_ylabel('Y', fontsize=10, labelpad=10)
+        self.ax.set_zlabel('f(x, y)', fontsize=10, labelpad=10)
+        self.ax.set_title(f"Метод сопряжённых градиентов — Шаг {frame+1}/{len(self.smooth_path)}", 
+                         fontsize=14, pad=20)
+        
+        self.ax.legend(loc='upper left', bbox_to_anchor=(0, 1))
+        self.ax.view_init(elev=25, azim=-60 + frame * 0.2)
+        
+        self.canvas.draw()
+        
+        # Обновляем информацию
+        if frame < len(self.smooth_path):
+            curr_point = self.smooth_path[frame]
+            curr_z = self.f(curr_point[0], curr_point[1], p)
+            grad_norm = np.linalg.norm(self.grad(curr_point[0], curr_point[1], p))
+            
+            info = (f"🎯 Визуализация метода сопряжённых градиентов\n\n"
+                   f"Прогресс: {frame+1}/{len(self.smooth_path)} шагов\n"
+                   f"Завершение: {100*(frame+1)//len(self.smooth_path)}%\n\n"
+                   f"📍 Текущая точка:\n"
+                   f"   x = {curr_point[0]:.6f}\n"
+                   f"   y = {curr_point[1]:.6f}\n"
+                   f"   f(x,y) = {curr_z:.6f}\n"
+                   f"   ||∇f|| = {grad_norm:.6f}\n\n"
+                   f"📊 Точный минимум:\n"
+                   f"   x* = {sol[0]:.6f}\n"
+                   f"   y* = {sol[1]:.6f}\n"
+                   f"   f* = {z_sol:.6f}\n\n"
+                   f"✨ Итераций метода: {len(self.real_iter_data)}")
+            
+            self.set_info(info)
+        
+        # Завершение анимации
+        if frame >= len(self.smooth_path) - 1:
+            self.animation.event_source.stop()
+            self.is_running = False
+            self.set_info(f"✅ Визуализация завершена!\n\n"
+                         f"Найденная точка: ({self.solution[0]:.6f}, {self.solution[1]:.6f})\n"
+                         f"Значение функции: {self.f(self.solution[0], self.solution[1], p):.6f}\n"
+                         f"Количество итераций: {len(self.real_iter_data)}\n"
+                         f"Количество шагов анимации: {len(self.smooth_path)}")
+
+    def start(self):
+        """Запуск визуализации"""
+        if self.is_running:
+            messagebox.showinfo("Информация", "Визуализация уже выполняется")
+            return
+        
+        # Останавливаем предыдущую анимацию
+        if self.animation is not None:
+            try:
+                self.animation.event_source.stop()
+            except:
+                pass
+        
+        data = self.read_params()
+        if data is None:
+            return
+        
+        p, start, tol, max_iter = data
+        self.params = p
+        
+        # Запускаем метод
+        smooth_path, iteration_data = self.conjugate_gradient(start, p, tol, max_iter)
+        self.smooth_path = smooth_path
+        self.real_iter_data = iteration_data
+        self.solution = smooth_path[-1]
+        self.is_running = True
+        
+        # Отрисовываем базовый график
+        self.draw_base_plot()
+        
+        # Запускаем анимацию
+        self.animation = FuncAnimation(
+            self.fig, 
+            self.update_animation, 
+            frames=len(smooth_path),
+            interval=50,  # 50 мс между кадрами
+            repeat=False
+        )
+        
+        self.canvas.draw()
+        self.set_info(f"🚀 Запуск визуализации...\n\nНачальная точка: ({start[0]}, {start[1]})\nВсего шагов: {len(smooth_path)}")
+
+    def reset(self):
+        """Сброс параметров"""
+        if self.animation is not None:
+            try:
+                self.animation.event_source.stop()
+            except:
+                pass
+        
+        self.is_running = False
+        self.smooth_path = None
+        self.real_iter_data = None
+        self.solution = None
+        
+        # Сброс значений
+        defaults = {
+            "A": "1.5", "B": "2.5", "C": "0.8",
+            "D": "-10", "E": "-8", "F": "0",
+            "x0": "7", "y0": "6",
+            "tol": "0.0001", "max_iter": "15"
+        }
+        
+        for key, value in defaults.items():
+            if key in self.entries:
+                self.entries[key].delete(0, tk.END)
+                self.entries[key].insert(0, value)
+        
+        self.draw_base_plot()
+        self.set_info("✅ Параметры сброшены. Нажмите «Старт» для запуска визуализации.")
+
+    def exit_app(self):
+        """Выход из приложения"""
+        if self.animation is not None:
+            try:
+                self.animation.event_source.stop()
+            except:
+                pass
+        if self.log_window is not None and self.log_window.winfo_exists():
+            self.log_window.destroy()
+        plt.close('all')
+        self.root.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ConjugateGradientApp(root)
+    root.mainloop()
